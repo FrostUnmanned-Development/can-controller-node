@@ -15,9 +15,9 @@ import os
 import sys
 
 # Add parent directory to path for base_node import
-sys.path.append(str(Path(__file__).parent.parent.parent / "src" / "onboard_core"))
+sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent / "src" / "onboard_core"))
 
-from base_node import BaseNode, MessageType, Priority
+from base_node import BaseNode, MessageType, Priority, NodeMessage
 
 logger = logging.getLogger(__name__)
 
