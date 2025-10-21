@@ -1,0 +1,29 @@
+{
+    "node_name": "can_controller",
+    "node_port": 14551,
+    "master_core_host": "localhost",
+    "master_core_port": 14550,
+    "direct_communication": true,
+    "emergency_nodes": ["engine", "steering", "autopilot"],
+    
+    "can_interface": "socketcan",
+    "can_channel": "vcan0",
+    "can_bitrate": 250000,
+    "emergency_stop_enabled": true,
+    "playback_enabled": true,
+    
+    "known_nodes": {
+        "engine": {
+            "host": "localhost",
+            "port": 14553
+        },
+        "steering": {
+            "host": "localhost",
+            "port": 14554
+        },
+        "autopilot": {
+            "host": "localhost",
+            "port": 14555
+        }
+    }
+}
