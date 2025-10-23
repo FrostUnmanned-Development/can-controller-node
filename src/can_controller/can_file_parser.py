@@ -67,18 +67,18 @@ class CANFileParser:
             # Extract fields based on the real Kvaser log format:
             # Header: WinNo P   PGN SA  DA Flg   Len  D0...1...2...3...4...5...6..D7      Time   Dir
             # Actual: CAN 1 6 1F10D DE->*         8   05  FF  5E  06  FF  FF  FF  FF    1840.937662 R
-            # The header seems misleading - PGN appears to be in position 3, not 2
+            # The header is misleading! The actual format is:
+            # CAN 1 6 1F211 91->* means Priority=1, Unknown=6, PGN=1F211, SA=91, DA=*
             win_no = parts[0] if len(parts) > 0 else ""
             priority = parts[1] if len(parts) > 1 else ""
-            pgn = parts[3] if len(parts) > 3 else ""  # PGN is actually in position 3
-            sa = parts[2] if len(parts) > 2 else ""   # SA is in position 2
-            da = parts[4] if len(parts) > 4 else ""
-            flg = parts[5] if len(parts) > 5 else ""
-            length = parts[6] if len(parts) > 6 else "8"
+            unknown_field = parts[2] if len(parts) > 2 else ""  # Unknown field (maybe reserved)
+            pgn = parts[3] if len(parts) > 3 else ""  # PGN is in position 3
+            sa_da_field = parts[4] if len(parts) > 4 else ""  # SA->DA field like "91->*"
+            length = parts[5] if len(parts) > 5 else "8"
             
-            # Extract data bytes (D0-D7) - they start from index 7
+            # Extract data bytes (D0-D7) - they start from index 6
             data_bytes = []
-            for i in range(7, min(15, len(parts))):  # D0-D7
+            for i in range(6, min(14, len(parts))):  # D0-D7
                 if parts[i] and parts[i] != '-':
                     try:
                         data_bytes.append(int(parts[i], 16))
@@ -103,16 +103,28 @@ class CANFileParser:
             except ValueError:
                 pgn_int = 0
                 
-            # Convert source address to integer
+            # Convert source address to integer (extract from SA->DA field)
             try:
-                sa_int = int(sa, 16) if sa else 0
+                if '->' in sa_da_field:
+                    sa_part = sa_da_field.split('->')[0]
+                    sa_int = int(sa_part, 16) if sa_part else 0
+                else:
+                    sa_int = int(sa_da_field, 16) if sa_da_field else 0
             except ValueError:
                 sa_int = 0
                 
             # Convert destination address to integer (handle ->* format)
+            # Format: "91->*" means SA=91, DA=* (broadcast = 0xFF)
             try:
-                da_clean = da.replace('->*', '').replace('->FF', '')
-                da_int = int(da_clean, 16) if da_clean else 0xFF
+                if '->' in sa_da_field:
+                    # Extract destination from "91->*" format
+                    da_part = sa_da_field.split('->')[1] if '->' in sa_da_field else sa_da_field
+                    if da_part == '*':
+                        da_int = 0xFF  # Broadcast
+                    else:
+                        da_int = int(da_part, 16) if da_part else 0xFF
+                else:
+                    da_int = int(sa_da_field, 16) if sa_da_field else 0xFF
             except ValueError:
                 da_int = 0xFF
                 
