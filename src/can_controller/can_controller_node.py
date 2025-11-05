@@ -16,10 +16,10 @@ import json
 import os
 import sys
 
-# Add parent directory to path for base_node import
-sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent / "src" / "onboard_core"))
+# Import BaseNode from template-node submodule
+sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent / "nodes" / "template-node" / "src"))
 
-from base_node import BaseNode, MessageType, Priority, NodeMessage
+from template_node.base_node import BaseNode, MessageType, Priority, NodeMessage
 from nmea2000.decoder import NMEA2000Decoder
 
 # Import constants for data categorization
