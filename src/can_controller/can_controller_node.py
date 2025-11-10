@@ -60,7 +60,8 @@ class CANControllerNode(BaseNode):
         # Data processing
         self.data_subscribers = []  # Nodes subscribed to CAN data
         self.emergency_stop_enabled = True
-        self.data_ttl_days = config.get("data_ttl_days", 7)
+        # Use get_config_value() for enterprise config hierarchy (Master Core > Local > Default)
+        self.data_ttl_days = self.get_config_value("data_ttl_days", 7)
         
         # CAN file playback
         self.playback_enabled = config.get("playback_enabled", True)
@@ -75,10 +76,28 @@ class CANControllerNode(BaseNode):
         
         logger.info(f"CAN Controller Node initialized for {self.can_interface}:{self.can_channel}")
     
+    def on_config_updated(self, config_updates: Dict[str, Any]):
+        """Handle configuration updates from Master Core
+        
+        Called automatically when Master Core sends config updates.
+        Updates TTL settings dynamically.
+        """
+        if "data_ttl_days" in config_updates:
+            old_ttl = self.data_ttl_days
+            self.data_ttl_days = self.get_config_value("data_ttl_days", 7)
+            logger.info(f"TTL configuration updated: {old_ttl} -> {self.data_ttl_days} days")
+    
     def start(self):
         """Start the CAN controller node"""
         if not super().start():
             return False
+        
+        # Request configuration from Master Core (enterprise pattern)
+        self.request_config_from_master()
+        
+        # Update data_ttl_days from config hierarchy
+        self.data_ttl_days = self.get_config_value("data_ttl_days", 7)
+        logger.info(f"CAN Controller Node using TTL: {self.data_ttl_days} days (from {'Master Core' if 'data_ttl_days' in self.master_core_config else 'local config'})")
         
         # Start CAN bus
         if self._start_can_bus():
