@@ -2,7 +2,6 @@
 
 python-can>=4.3.0
 nmea2000>=0.1.0
-python-daemon>=3.0.0
 pymongo>=4.6.0
 pathlib2>=2.3.7
 

@@ -13,8 +13,11 @@ import struct
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import json
+import argparse
 import os
 import sys
+import platform
+import tempfile
 
 # Import BaseNode from template-node submodule
 sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent / "nodes" / "template-node" / "src"))
@@ -804,10 +807,6 @@ class CANControllerNode(BaseNode):
 
 def main():
     """Main entry point for CAN Controller Node"""
-    import argparse
-    import sys
-    import os
-    
     parser = argparse.ArgumentParser(description="CAN Controller Node")
     parser.add_argument("--config", default="config.json", help="Configuration file")
     parser.add_argument("--daemon", action="store_true", help="Run as daemon")
@@ -834,18 +833,26 @@ def main():
         }
     
     # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # On Windows daemon mode, ensure errors go to stderr for Master Core to capture
+    if args.daemon and platform.system() == 'Windows':
+        # Windows daemon: log to stderr so Master Core can capture it
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[logging.StreamHandler(sys.stderr)]
+        )
+    else:
+        # Normal mode: use default stdout
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
     
     # Create and start node
     node = CANControllerNode(config)
     
     if args.daemon:
         # Run as daemon (cross-platform)
-        import platform
-        import tempfile
         
         # Windows doesn't support fork(), so run in background without forking
         if platform.system() == 'Windows':
@@ -858,14 +865,17 @@ def main():
             
             logger.info(f"Running as background process on Windows (PID: {os.getpid()})")
             if node.start():
+                logger.info("CAN Controller Node started successfully, entering main loop")
                 try:
                     while True:
                         time.sleep(1)
                 except KeyboardInterrupt:
+                    logger.info("KeyboardInterrupt received, shutting down")
                     pass
             else:
-                logger.error("Failed to start CAN Controller Node")
+                logger.error("Failed to start CAN Controller Node, exiting")
                 sys.exit(1)
+            node.stop()
         else:
             # Unix/Linux: Use fork approach
             try:
