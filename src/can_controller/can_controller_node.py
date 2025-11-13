@@ -19,6 +19,7 @@ import sys
 import platform
 import tempfile
 import signal
+import uuid
 
 # Import BaseNode from template-node submodule
 sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent / "nodes" / "template-node" / "src"))
@@ -73,7 +74,9 @@ class CANControllerNode(BaseNode):
         self.playback_running = False
         
         # Register CAN-specific handlers
-        self.register_handler(MessageType.COMMAND, self._handle_can_command)
+        # Note: BaseNode routes by message type, so we register "command" handler
+        # that dispatches based on payload.command
+        self.register_handler("command", self._handle_can_command)
         self.register_handler("subscribe_data", self._handle_subscribe_data)
         self.register_handler("emergency_stop", self._handle_emergency_stop)
         self.register_handler("play_can_file", self._handle_play_can_file)
@@ -671,11 +674,53 @@ class CANControllerNode(BaseNode):
         command = message.payload.get("command")
         
         if command == "start_monitoring":
-            self._start_can_bus()
+            if self.can_bus:
+                # Already started
+                self._send_response(message, {"status": "success", "message": "CAN monitoring already started"}, addr)
+            else:
+                success = self._start_can_bus()
+                if success:
+                    self._send_response(message, {"status": "success", "message": "CAN monitoring started"}, addr)
+                else:
+                    self._send_error_response(message, "Failed to start CAN bus", addr)
         elif command == "stop_monitoring":
-            self._stop_can_bus()
+            if not self.can_bus:
+                self._send_response(message, {"status": "success", "message": "CAN monitoring already stopped"}, addr)
+            else:
+                self._stop_can_bus()
+                self._send_response(message, {"status": "success", "message": "CAN monitoring stopped"}, addr)
         elif command == "send_message":
-            self._send_can_message(message.payload.get("can_data"))
+            can_data = message.payload.get("can_data")
+            if can_data:
+                success = self._send_can_message(can_data)
+                self._send_response(message, {
+                    "status": "success" if success else "error",
+                    "message": "CAN message sent" if success else "Failed to send CAN message"
+                }, addr)
+            else:
+                self._send_error_response(message, "Missing can_data in payload", addr)
+        elif command == "send_j1939":
+            # Handle J1939/NMEA2000 message format
+            # Expected payload: {"pgn": int, "source_address": int, "data": list, "priority": int (optional)}
+            pgn = message.payload.get("pgn")
+            source_address = message.payload.get("source_address")
+            data = message.payload.get("data", [])
+            priority = message.payload.get("priority", 6)  # Default priority 6 (normal)
+            
+            if pgn is None or source_address is None:
+                self._send_error_response(message, "Missing pgn or source_address in payload", addr)
+                return
+            
+            success = self._send_j1939_message(pgn, source_address, data, priority)
+            self._send_response(message, {
+                "status": "success" if success else "error",
+                "message": f"J1939 message sent (PGN: {pgn}, SA: {source_address})" if success else "Failed to send J1939 message",
+                "pgn": pgn,
+                "source_address": source_address
+            }, addr)
+        else:
+            logger.warning(f"Unknown CAN command: {command}")
+            self._send_error_response(message, f"Unknown command: {command}", addr)
     
     def _handle_subscribe_data(self, message: NodeMessage, addr: tuple):
         """Handle data subscription requests"""
@@ -766,6 +811,10 @@ class CANControllerNode(BaseNode):
     def _send_can_message(self, can_data: Dict[str, Any]):
         """Send message on CAN bus"""
         try:
+            if not self.can_bus:
+                logger.error("CAN bus not initialized")
+                return False
+                
             message = can.Message(
                 arbitration_id=can_data["arbitration_id"],
                 data=can_data["data"],
@@ -773,10 +822,109 @@ class CANControllerNode(BaseNode):
             )
             
             self.can_bus.send(message)
-            logger.debug(f"CAN message sent: {can_data['arbitration_id']}")
+            logger.debug(f"CAN message sent: arbitration_id=0x{can_data['arbitration_id']:X}, data={can_data['data']}")
+            return True
             
         except Exception as e:
             logger.error(f"Failed to send CAN message: {e}")
+            return False
+    
+    def _j1939_to_can_id(self, pgn: int, source_address: int, priority: int = 6) -> int:
+        """
+        Convert J1939/NMEA2000 parameters to CAN arbitration ID
+        
+        CAN ID format (29-bit extended):
+        - Priority (3 bits, bits 26-28)
+        - Reserved (1 bit, bit 25, always 0)
+        - PGN (18 bits, bits 8-24)
+        - Source Address (8 bits, bits 0-7)
+        
+        Formula: (priority << 26) | (pgn << 8) | source_address
+        """
+        # Ensure values are within valid ranges
+        priority = max(0, min(7, priority))  # 3 bits: 0-7
+        pgn = max(0, min(0x3FFFF, pgn))  # 18 bits: 0-262143
+        source_address = max(0, min(0xFF, source_address))  # 8 bits: 0-255
+        
+        can_id = (priority << 26) | (pgn << 8) | source_address
+        return can_id
+    
+    def _send_j1939_message(self, pgn: int, source_address: int, data: list, priority: int = 6) -> bool:
+        """
+        Send J1939/NMEA2000 message on CAN bus
+        
+        Args:
+            pgn: Parameter Group Number (18-bit)
+            source_address: Source address (8-bit)
+            data: Message data (list of bytes/ints, 0-8 bytes)
+            priority: Message priority (0-7, default 6 for normal)
+        
+        Returns:
+            bool: True if message sent successfully, False otherwise
+        """
+        try:
+            if not self.can_bus:
+                logger.error("CAN bus not initialized - cannot send J1939 message")
+                return False
+            
+            # Convert data to bytes if needed
+            if isinstance(data, list):
+                data_bytes = bytes([int(b) & 0xFF for b in data])
+            else:
+                data_bytes = bytes(data)
+            
+            # Limit to 8 bytes (CAN frame max)
+            if len(data_bytes) > 8:
+                logger.warning(f"J1939 data truncated from {len(data_bytes)} to 8 bytes")
+                data_bytes = data_bytes[:8]
+            
+            # Convert J1939 parameters to CAN arbitration ID
+            can_id = self._j1939_to_can_id(pgn, source_address, priority)
+            
+            # Create CAN message (NMEA2000 uses extended 29-bit IDs)
+            can_message = can.Message(
+                arbitration_id=can_id,
+                data=data_bytes,
+                is_extended_id=True  # NMEA2000 uses 29-bit extended IDs
+            )
+            
+            # Send message
+            self.can_bus.send(can_message)
+            logger.info(f"J1939 message sent: PGN=0x{pgn:X} ({pgn}), SA=0x{source_address:02X} ({source_address}), "
+                       f"CAN_ID=0x{can_id:X}, data={list(data_bytes)}, priority={priority}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to send J1939 message (PGN: {pgn}, SA: {source_address}): {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+    def _send_response(self, original_message: NodeMessage, data: Dict[str, Any], addr: tuple):
+        """Send response message"""
+        response = NodeMessage(
+            message_id=str(uuid.uuid4()),
+            type=MessageType.RESPONSE,
+            priority=Priority.NORMAL,
+            source=self.node_name,
+            destination=original_message.source,
+            payload=data,
+            timestamp=time.time()
+        )
+        self._send_message(response, addr)
+    
+    def _send_error_response(self, original_message: NodeMessage, error: str, addr: tuple):
+        """Send error response message"""
+        response = NodeMessage(
+            message_id=str(uuid.uuid4()),
+            type=MessageType.RESPONSE,
+            priority=Priority.HIGH,
+            source=self.node_name,
+            destination=original_message.source,
+            payload={"error": error},
+            timestamp=time.time()
+        )
+        self._send_message(response, addr)
     
     def _send_emergency_stop_can(self):
         """Send emergency stop message on CAN bus"""
