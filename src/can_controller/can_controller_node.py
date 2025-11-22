@@ -99,20 +99,34 @@ class CANControllerNode(BaseNode):
         if not super().start():
             return False
         
+        logger.info(f"🔧 [can_controller] Starting configuration setup...")
+        logger.info(f"🔧 [can_controller] Current master_core_config: {self.master_core_config}")
+        logger.info(f"🔧 [can_controller] Current local config data_ttl_days: {self.config.get('data_ttl_days', 'NOT SET')}")
+        
         # Request configuration from Master Core (enterprise pattern)
+        logger.info(f"🔧 [can_controller] Requesting config from Master Core...")
         self.request_config_from_master()
         
+        # Give Master Core a moment to respond (config is async)
+        time.sleep(0.5)  # Small delay for config response
+        
         # Update data_ttl_days from config hierarchy
+        logger.info(f"🔧 [can_controller] Getting data_ttl_days from config hierarchy...")
+        logger.info(f"🔧 [can_controller] master_core_config after request: {self.master_core_config}")
         self.data_ttl_days = self.get_config_value("data_ttl_days", 7)
-        logger.info(f"CAN Controller Node using TTL: {self.data_ttl_days} days (from {'Master Core' if 'data_ttl_days' in self.master_core_config else 'local config'})")
+        
+        config_source = "Master Core" if "data_ttl_days" in self.master_core_config else "local config"
+        logger.info(f"✅ [can_controller] CAN Controller Node using TTL: {self.data_ttl_days} days (from {config_source})")
+        logger.info(f"🔧 [can_controller] TTL in seconds: {self.data_ttl_days * 86400}")
         
         # Start CAN bus
         if self._start_can_bus():
             self.status = "RUNNING"
-            logger.info("CAN Controller Node started successfully")
+            logger.info("✅ [can_controller] CAN Controller Node started successfully")
             return True
         else:
             self.status = "ERROR"
+            logger.error("❌ [can_controller] Failed to start CAN bus")
             return False
     
     def stop(self):
@@ -143,6 +157,7 @@ class CANControllerNode(BaseNode):
     def _start_can_bus(self) -> bool:
         """Start CAN bus communication"""
         try:
+            logger.info(f"🔧 [can_controller] Attempting to start CAN bus on {self.can_interface}:{self.can_channel} at {self.can_bitrate} bps")
             self.can_bus = can.interface.Bus(
                 interface=self.can_interface,
                 channel=self.can_channel,
@@ -155,11 +170,16 @@ class CANControllerNode(BaseNode):
             self.can_thread.daemon = True
             self.can_thread.start()
             
-            logger.info(f"CAN bus started on {self.can_interface}:{self.can_channel}")
+            logger.info(f"✅ [can_controller] CAN bus started successfully on {self.can_interface}:{self.can_channel}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to start CAN bus: {e}")
+            logger.error(f"❌ [can_controller] Failed to start CAN bus: {e}")
+            logger.error(f"❌ [can_controller] Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"❌ [can_controller] Traceback: {traceback.format_exc()}")
+            logger.error(f"❌ [can_controller] CAN interface: {self.can_interface}, channel: {self.can_channel}, bitrate: {self.can_bitrate}")
+            logger.warning(f"⚠️ [can_controller] CAN bus initialization failed. Node will continue but CAN functionality will be unavailable.")
             return False
     
     def _stop_can_bus(self):
@@ -323,6 +343,22 @@ class CANControllerNode(BaseNode):
             return DataCategories.ENERGYDISTRIBUTION
         elif data.PGN == 127501:  # 1F20D - "Switch Bank Status"
             return DataCategories.ENERGYDISTRIBUTION
+        elif data.PGN == 127245:  # 1F10D - "Rudder"
+            return DataCategories.STEERING
+        elif data.PGN == 127508:  # 1F214 - "Battery Status"
+            return DataCategories.BATTERY
+        elif data.PGN == 127506:  # 1F212 - "DC Detailed Status"
+            return DataCategories.BATTERY
+        elif data.PGN == 129283:  # 1F903 - "Cross Track Error"
+            return DataCategories.NAVIGATION
+        elif data.PGN == 129284:  # 1F904 - "Navigation Data"
+            return DataCategories.NAVIGATION
+        elif data.PGN == 65361:  # FF51 - "Raymarine Alarm"
+            return DataCategories.PRODUCT
+        elif data.PGN == 60928:  # EE00 - "ISO Address Claim"
+            return DataCategories.PRODUCT
+        elif data.PGN == 59392:  # E800 - "ISO Acknowledge"
+            return DataCategories.PRODUCT
         else:
             return DataCategories.UNKNOWN
     
@@ -563,6 +599,54 @@ class CANControllerNode(BaseNode):
                     "unit_time": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
                     "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
                 }
+            elif category == DataCategories.NAVIGATION and data.PGN == 129283:
+                # Generate title from field IDs (modularized function)
+                title = self._generate_field_title(data.fields)
+                
+                return {
+                    "title": title,
+                    "pgn": data.PGN,
+                    "source": data.source,
+                    "dest": data.destination,
+                    "sid": data.fields[0].value if len(data.fields) > 0 else None,
+                    "unit_sid": data.fields[0].unit_of_measurement if len(data.fields) > 0 else None,
+                    "xte_mode": data.fields[1].raw_value if len(data.fields) > 1 else None,
+                    "unit_xte_mode": data.fields[1].unit_of_measurement if len(data.fields) > 1 else None,
+                    "reserved_12": data.fields[2].value if len(data.fields) > 2 else None,
+                    "unit_reserved_12": data.fields[2].unit_of_measurement if len(data.fields) > 2 else None,
+                    "navigation_terminated": data.fields[3].raw_value if len(data.fields) > 3 else None,
+                    "unit_navigation_terminated": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
+                    "xte": data.fields[4].value if len(data.fields) > 4 else None,
+                    "unit_xte": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
+                    "reserved_48": data.fields[5].value if len(data.fields) > 5 else None,
+                    "unit_reserved_48": data.fields[5].unit_of_measurement if len(data.fields) > 5 else None,
+                    "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
+                }
+            elif category == DataCategories.NAVIGATION and data.PGN == 129284:
+                # Generate title from field IDs (modularized function)
+                title = self._generate_field_title(data.fields)
+                
+                return {
+                    "title": title,
+                    "pgn": data.PGN,
+                    "source": data.source,
+                    "dest": data.destination,
+                    "sid": data.fields[0].value if len(data.fields) > 0 else None,
+                    "unit_sid": data.fields[0].unit_of_measurement if len(data.fields) > 0 else None,
+                    "distance_to_waypoint": data.fields[1].value if len(data.fields) > 1 else None,
+                    "unit_distance_to_waypoint": data.fields[1].unit_of_measurement if len(data.fields) > 1 else None,
+                    "course_bearing_reference": data.fields[2].raw_value if len(data.fields) > 2 else None,
+                    "unit_course_bearing_reference": data.fields[2].unit_of_measurement if len(data.fields) > 2 else None,
+                    "perpendicular_crossed": data.fields[3].raw_value if len(data.fields) > 3 else None,
+                    "unit_perpendicular_crossed": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
+                    "arrival_circle_entered": data.fields[4].raw_value if len(data.fields) > 4 else None,
+                    "unit_arrival_circle_entered": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
+                    "calculation_type": data.fields[5].raw_value if len(data.fields) > 5 else None,
+                    "unit_calculation_type": data.fields[5].unit_of_measurement if len(data.fields) > 5 else None,
+                    "eta_time": data.fields[6].value if len(data.fields) > 6 else None,
+                    "unit_eta_time": data.fields[6].unit_of_measurement if len(data.fields) > 6 else None,
+                    "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
+                }
             elif category == DataCategories.ENGINE and data.PGN == 127488:
                 # Generate title from field IDs (modularized function)
                 title = self._generate_field_title(data.fields)
@@ -603,6 +687,146 @@ class CANControllerNode(BaseNode):
                     "unit_dc_current": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
                     "reserved_56": data.fields[4].value if len(data.fields) > 4 else None,
                     "unit_reserved_56": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
+                    "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
+                }
+            elif category == DataCategories.PRODUCT and data.PGN == 65361:
+                # Generate title from field IDs (modularized function)
+                title = self._generate_field_title(data.fields)
+                
+                return {
+                    "title": title,
+                    "pgn": data.PGN,
+                    "source": data.source,
+                    "dest": data.destination,
+                    "manufacturer_code": data.fields[0].raw_value if len(data.fields) > 0 else None,
+                    "unit_manufacturer_code": data.fields[0].unit_of_measurement if len(data.fields) > 0 else None,
+                    "reserved_11": data.fields[1].value if len(data.fields) > 1 else None,
+                    "unit_reserved_11": data.fields[1].unit_of_measurement if len(data.fields) > 1 else None,
+                    "industry_code": data.fields[2].raw_value if len(data.fields) > 2 else None,
+                    "unit_industry_code": data.fields[2].unit_of_measurement if len(data.fields) > 2 else None,
+                    "alarm_id": data.fields[3].raw_value if len(data.fields) > 3 else None,
+                    "unit_alarm_id": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
+                    "alarm_group": data.fields[4].raw_value if len(data.fields) > 4 else None,
+                    "unit_alarm_group": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
+                    "reserved_32": data.fields[5].value if len(data.fields) > 5 else None,
+                    "unit_reserved_32": data.fields[5].unit_of_measurement if len(data.fields) > 5 else None,
+                    "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
+                }
+            elif category == DataCategories.PRODUCT and data.PGN == 60928:
+                # Generate title from field IDs (modularized function)
+                title = self._generate_field_title(data.fields)
+                
+                return {
+                    "title": title,
+                    "pgn": data.PGN,
+                    "source": data.source,
+                    "dest": data.destination,
+                    "unique_number": data.fields[0].value if len(data.fields) > 0 else None,
+                    "unit_unique_number": data.fields[0].unit_of_measurement if len(data.fields) > 0 else None,
+                    "manufacturer_code": data.fields[1].raw_value if len(data.fields) > 1 else None,
+                    "unit_manufacturer_code": data.fields[1].unit_of_measurement if len(data.fields) > 1 else None,
+                    "device_instance_lower": data.fields[2].value if len(data.fields) > 2 else None,
+                    "unit_device_instance_lower": data.fields[2].unit_of_measurement if len(data.fields) > 2 else None,
+                    "device_instance_upper": data.fields[3].value if len(data.fields) > 3 else None,
+                    "unit_device_instance_upper": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
+                    "device_function": data.fields[4].raw_value if len(data.fields) > 4 else None,
+                    "unit_device_function": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
+                    "spare": data.fields[5].value if len(data.fields) > 5 else None,
+                    "unit_spare": data.fields[5].unit_of_measurement if len(data.fields) > 5 else None,
+                    "device_class": data.fields[6].raw_value if len(data.fields) > 6 else None,
+                    "unit_device_class": data.fields[6].unit_of_measurement if len(data.fields) > 6 else None,
+                    "industry_code": data.fields[7].raw_value if len(data.fields) > 7 else None,
+                    "unit_industry_code": data.fields[7].unit_of_measurement if len(data.fields) > 7 else None,
+                    "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
+                }
+            elif category == DataCategories.PRODUCT and data.PGN == 59392:
+                # Generate title from field IDs (modularized function)
+                title = self._generate_field_title(data.fields)
+                
+                return {
+                    "title": title,
+                    "pgn": data.PGN,
+                    "source": data.source,
+                    "dest": data.destination,
+                    "control": data.fields[0].raw_value if len(data.fields) > 0 else None,
+                    "unit_control": data.fields[0].unit_of_measurement if len(data.fields) > 0 else None,
+                    "group_function": data.fields[1].value if len(data.fields) > 1 else None,
+                    "unit_group_function": data.fields[1].unit_of_measurement if len(data.fields) > 1 else None,
+                    "reserved_16": data.fields[2].value if len(data.fields) > 2 else None,
+                    "unit_reserved_16": data.fields[2].unit_of_measurement if len(data.fields) > 2 else None,
+                    "ack_pgn": data.fields[3].value if len(data.fields) > 3 else None,
+                    "unit_ack_pgn": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
+                    "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
+                }
+            elif category == DataCategories.STEERING and data.PGN == 127245:
+                # Generate title from field IDs (modularized function)
+                title = self._generate_field_title(data.fields)
+                
+                return {
+                    "title": title,
+                    "pgn": data.PGN,
+                    "source": data.source,
+                    "dest": data.destination,
+                    "instance": data.fields[0].value if len(data.fields) > 0 else None,
+                    "unit_instance": data.fields[0].unit_of_measurement if len(data.fields) > 0 else None,
+                    "direction_order": data.fields[1].raw_value if len(data.fields) > 1 else None,
+                    "unit_direction_order": data.fields[1].unit_of_measurement if len(data.fields) > 1 else None,
+                    "reserved_11": data.fields[2].value if len(data.fields) > 2 else None,
+                    "unit_reserved_11": data.fields[2].unit_of_measurement if len(data.fields) > 2 else None,
+                    "angle_order": data.fields[3].value if len(data.fields) > 3 else None,
+                    "unit_angle_order": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
+                    "position": data.fields[4].value if len(data.fields) > 4 else None,
+                    "unit_position": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
+                    "reserved_48": data.fields[5].value if len(data.fields) > 5 else None,
+                    "unit_reserved_48": data.fields[5].unit_of_measurement if len(data.fields) > 5 else None,
+                    "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
+                }
+            elif category == DataCategories.BATTERY and data.PGN == 127508:
+                # Generate title from field IDs (modularized function)
+                title = self._generate_field_title(data.fields)
+                
+                return {
+                    "title": title,
+                    "pgn": data.PGN,
+                    "source": data.source,
+                    "dest": data.destination,
+                    "instance": data.fields[0].value if len(data.fields) > 0 else None,
+                    "unit_instance": data.fields[0].unit_of_measurement if len(data.fields) > 0 else None,
+                    "voltage": data.fields[1].value if len(data.fields) > 1 else None,
+                    "unit_voltage": data.fields[1].unit_of_measurement if len(data.fields) > 1 else None,
+                    "current": data.fields[2].value if len(data.fields) > 2 else None,
+                    "unit_current": data.fields[2].unit_of_measurement if len(data.fields) > 2 else None,
+                    "temperature": data.fields[3].value if len(data.fields) > 3 else None,
+                    "unit_temperature": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
+                    "sid": data.fields[4].value if len(data.fields) > 4 else None,
+                    "unit_sid": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
+                    "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
+                }
+            elif category == DataCategories.BATTERY and data.PGN == 127506:
+                # Generate title from field IDs (modularized function)
+                title = self._generate_field_title(data.fields)
+                
+                return {
+                    "title": title,
+                    "pgn": data.PGN,
+                    "source": data.source,
+                    "dest": data.destination,
+                    "sid": data.fields[0].value if len(data.fields) > 0 else None,
+                    "unit_sid": data.fields[0].unit_of_measurement if len(data.fields) > 0 else None,
+                    "instance": data.fields[1].value if len(data.fields) > 1 else None,
+                    "unit_instance": data.fields[1].unit_of_measurement if len(data.fields) > 1 else None,
+                    "dc_type": data.fields[2].raw_value if len(data.fields) > 2 else None,
+                    "unit_dc_type": data.fields[2].unit_of_measurement if len(data.fields) > 2 else None,
+                    "state_of_charge": data.fields[3].value if len(data.fields) > 3 else None,
+                    "unit_state_of_charge": data.fields[3].unit_of_measurement if len(data.fields) > 3 else None,
+                    "state_of_health": data.fields[4].value if len(data.fields) > 4 else None,
+                    "unit_state_of_health": data.fields[4].unit_of_measurement if len(data.fields) > 4 else None,
+                    "time_remaining": data.fields[5].value if len(data.fields) > 5 else None,
+                    "unit_time_remaining": data.fields[5].unit_of_measurement if len(data.fields) > 5 else None,
+                    "ripple_voltage": data.fields[6].value if len(data.fields) > 6 else None,
+                    "unit_ripple_voltage": data.fields[6].unit_of_measurement if len(data.fields) > 6 else None,
+                    "remaining_capacity": data.fields[7].value if len(data.fields) > 7 else None,
+                    "unit_remaining_capacity": data.fields[7].unit_of_measurement if len(data.fields) > 7 else None,
                     "timestamp": data.timestamp.isoformat() if hasattr(data.timestamp, 'isoformat') else str(data.timestamp)
                 }
             else:
@@ -666,6 +890,12 @@ class CANControllerNode(BaseNode):
             return "Engine"
         elif category == DataCategories.ENERGYDISTRIBUTION:
             return "EnergyDistribution"
+        elif category == DataCategories.STEERING:
+            return "Steering"
+        elif category == DataCategories.BATTERY:
+            return "Battery"
+        elif category == DataCategories.PRODUCT:
+            return "Product"
         else:
             return "Unknown"
     
