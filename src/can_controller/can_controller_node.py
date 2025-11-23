@@ -73,6 +73,10 @@ class CANControllerNode(BaseNode):
         self.playback_thread = None
         self.playback_running = False
         
+        # Background heartbeat task
+        self.heartbeat_task_running = False
+        self.heartbeat_thread = None
+        
         # Register CAN-specific handlers
         # Note: BaseNode routes by message type, so we register "command" handler
         # that dispatches based on payload.command
@@ -121,6 +125,8 @@ class CANControllerNode(BaseNode):
         
         # Start CAN bus
         if self._start_can_bus():
+            # Start background heartbeat task
+            self._start_heartbeat_task()
             self.status = "RUNNING"
             logger.info("✅ [can_controller] CAN Controller Node started successfully")
             return True
@@ -131,6 +137,7 @@ class CANControllerNode(BaseNode):
     
     def stop(self):
         """Stop the CAN controller node"""
+        self._stop_heartbeat_task()
         self._stop_can_bus()
         self._stop_playback()
         super().stop()
@@ -948,6 +955,30 @@ class CANControllerNode(BaseNode):
                 "pgn": pgn,
                 "source_address": source_address
             }, addr)
+        elif command == "send_can_message":
+            # Handle send_can_message command from other nodes (e.g., Steering Control Node)
+            # Expected payload: {"pgn": int, "data": dict}
+            pgn = message.payload.get("pgn")
+            data = message.payload.get("data", {})
+            
+            if pgn is None:
+                self._send_error_response(message, "Missing pgn in payload", addr)
+                return
+            
+            if pgn == 127245:  # Rudder PGN
+                # Format NMEA2000 message
+                can_message_data = self._format_rudder_message(data)
+                if can_message_data:
+                    success = self._send_can_message(can_message_data)
+                    self._send_response(message, {
+                        "status": "success" if success else "error",
+                        "pgn": pgn,
+                        "message": "Rudder message sent to CAN bus" if success else "Failed to send rudder message"
+                    }, addr)
+                else:
+                    self._send_error_response(message, "Failed to format rudder message", addr)
+            else:
+                self._send_error_response(message, f"Unsupported PGN for send_can_message: {pgn}", addr)
         else:
             logger.warning(f"Unknown CAN command: {command}")
             self._send_error_response(message, f"Unknown command: {command}", addr)
@@ -1038,21 +1069,133 @@ class CANControllerNode(BaseNode):
         finally:
             self.playback_running = False
     
+    def _start_heartbeat_task(self):
+        """Start background heartbeat task"""
+        self.heartbeat_task_running = True
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_worker)
+        self.heartbeat_thread.daemon = True
+        self.heartbeat_thread.start()
+        logger.debug("Background heartbeat task started")
+    
+    def _stop_heartbeat_task(self):
+        """Stop background heartbeat task"""
+        self.heartbeat_task_running = False
+        if self.heartbeat_thread:
+            self.heartbeat_thread.join(timeout=5)
+        logger.debug("Background heartbeat task stopped")
+    
+    def _heartbeat_worker(self):
+        """Background worker thread for periodic heartbeat"""
+        while self.heartbeat_task_running:
+            try:
+                current_time = time.time()
+                
+                # Send heartbeat every 10 seconds (for connection state tracking)
+                if int(current_time) % 10 == 0:
+                    self.send_heartbeat()
+                
+                time.sleep(1)  # Check every second
+            except Exception as e:
+                logger.error(f"Error in heartbeat worker: {e}")
+                time.sleep(1)
+    
+    def _format_rudder_message(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Format rudder position data as NMEA2000 CAN message (PGN 127245)
+        
+        Args:
+            data: Dictionary containing rudder data fields:
+                - instance: Instance ID (0-255)
+                - position: Rudder position in radians
+                - directionOrder: Direction order (0-65535, optional, default 0)
+                - angleOrder: Requested angle in radians (optional, default 0.0)
+                - reserved_48: Reserved field (optional, default 0)
+        
+        Returns:
+            Dictionary with 'arbitration_id', 'data' (bytes), and 'is_extended_id' keys,
+            or None if formatting fails
+        """
+        try:
+            # Extract fields with defaults
+            instance = int(data.get("instance", 0)) & 0xFF
+            position_rad = float(data.get("position", 0.0))
+            direction_order = int(data.get("directionOrder", 0)) & 0xFFFF
+            angle_order_rad = float(data.get("angleOrder", 0.0))
+            reserved_48 = int(data.get("reserved_48", 0)) & 0xFF
+            
+            # NMEA2000 PGN 127245 (Rudder) byte structure:
+            # Byte 0: Instance (8 bits)
+            # Byte 1-2: Direction Order (16 bits, little-endian)
+            # Byte 3-4: Reserved (11 bits) + Angle Order upper bits (5 bits) - simplified to 16-bit angle_order
+            # Byte 5-6: Position (radians, 16-bit scaled, little-endian)
+            # Byte 7: Reserved (48 bits) - only 8 bits used here
+            
+            # NMEA2000 uses 0.0001 rad per LSB for 16-bit signed values
+            # Scale: multiply by 10000, then convert to signed 16-bit
+            RAD_SCALE = 10000  # 0.0001 rad per LSB
+            
+            # Convert radians to scaled integers (signed 16-bit)
+            angle_order_scaled = int(round(angle_order_rad * RAD_SCALE))
+            angle_order_scaled = max(-32768, min(32767, angle_order_scaled))  # Clamp to int16
+            
+            position_scaled = int(round(position_rad * RAD_SCALE))
+            position_scaled = max(-32768, min(32767, position_scaled))  # Clamp to int16
+            
+            # Pack data bytes (little-endian)
+            # Format: B (uint8) + H (uint16) + h (int16) + h (int16) + B (uint8)
+            data_bytes = struct.pack('<B H h h B',
+                instance,                    # Byte 0: Instance
+                direction_order,             # Bytes 1-2: Direction Order (uint16)
+                angle_order_scaled,          # Bytes 3-4: Angle Order (int16, radians scaled)
+                position_scaled,            # Bytes 5-6: Position (int16, radians scaled)
+                reserved_48                 # Byte 7: Reserved
+            )
+            
+            # Get source address from config or use default
+            source_address = self.get_config_value("can_source_address", 0x91)  # Default: 0x91 (common for control systems)
+            priority = 6  # Normal priority for steering commands
+            
+            # Calculate CAN ID using NMEA2000 format
+            pgn = 127245  # Rudder PGN
+            can_id = self._j1939_to_can_id(pgn, source_address, priority)
+            
+            logger.debug(f"Formatted rudder message: instance={instance}, position={position_rad:.4f} rad ({position_scaled}), "
+                        f"angle_order={angle_order_rad:.4f} rad ({angle_order_scaled}), CAN_ID=0x{can_id:X}")
+            
+            return {
+                "arbitration_id": can_id,
+                "data": list(data_bytes),  # Convert bytes to list for JSON serialization compatibility
+                "is_extended_id": True  # NMEA2000 uses 29-bit extended IDs
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to format rudder message: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return None
+    
     def _send_can_message(self, can_data: Dict[str, Any]):
         """Send message on CAN bus"""
         try:
             if not self.can_bus:
                 logger.error("CAN bus not initialized")
                 return False
+            
+            # Convert data list back to bytes if needed
+            data = can_data["data"]
+            if isinstance(data, list):
+                data_bytes = bytes(data)
+            else:
+                data_bytes = data
                 
             message = can.Message(
                 arbitration_id=can_data["arbitration_id"],
-                data=can_data["data"],
+                data=data_bytes,
                 is_extended_id=can_data.get("is_extended_id", False)
             )
             
             self.can_bus.send(message)
-            logger.debug(f"CAN message sent: arbitration_id=0x{can_data['arbitration_id']:X}, data={can_data['data']}")
+            logger.debug(f"CAN message sent: arbitration_id=0x{can_data['arbitration_id']:X}, data={list(data_bytes)}")
             return True
             
         except Exception as e:
