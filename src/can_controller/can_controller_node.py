@@ -1369,7 +1369,7 @@ def main():
             "can_bitrate": 250000,
             "node_port": 14553,
             "master_core_host": "localhost",
-            "master_core_port": 14551,  # IPC server port
+            "master_core_port": 14553,  # IPC server port
             "direct_communication": True,
             "emergency_nodes": ["engine", "steering", "autopilot"],
             "playback_enabled": True

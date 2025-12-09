@@ -2,7 +2,7 @@
     "node_name": "can_controller",
     "node_port": 14553,
     "master_core_host": "localhost",
-    "master_core_port": 14550,
+    "master_core_port": 14551,
     "direct_communication": true,
     "emergency_nodes": ["engine", "steering", "autopilot"],
     
