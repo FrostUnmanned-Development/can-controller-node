@@ -173,12 +173,14 @@ class CANControllerNode(BaseNode):
                 channel=self.can_channel,
                 bitrate=self.can_bitrate
             )
+            logger.info(f"✅ [can_controller] CAN bus initialized successfully: {self.can_bus}")
             
             # Start CAN message listener
             self.can_running = True
             self.can_thread = threading.Thread(target=self._can_message_loop)
             self.can_thread.daemon = True
             self.can_thread.start()
+            logger.info(f"✅ [can_controller] CAN message listener thread started")
             
             logger.info(f"✅ [can_controller] CAN bus started successfully on {self.can_interface}:{self.can_channel}")
             return True
@@ -970,15 +972,21 @@ class CANControllerNode(BaseNode):
             
             if pgn == 127245:  # Rudder PGN
                 # Format NMEA2000 message
+                logger.info(f"📤 Received send_can_message command for PGN 127245 (Rudder), data: {data}")
                 can_message_data = self._format_rudder_message(data)
                 if can_message_data:
+                    logger.info(f"📤 Formatted CAN message: arbitration_id=0x{can_message_data['arbitration_id']:X}, data={can_message_data['data']}")
+                    if not self.can_bus:
+                        logger.error("❌ CAN bus not initialized! Cannot send message.")
                     success = self._send_can_message(can_message_data)
                     self._send_response(message, {
                         "status": "success" if success else "error",
                         "pgn": pgn,
-                        "message": "Rudder message sent to CAN bus" if success else "Failed to send rudder message"
+                        "can_bus_initialized": self.can_bus is not None,
+                        "message": "Rudder message sent to CAN bus" if success else "Failed to send rudder message (check CAN bus initialization)"
                     }, addr)
                 else:
+                    logger.error("❌ Failed to format rudder message")
                     self._send_error_response(message, "Failed to format rudder message", addr)
             else:
                 self._send_error_response(message, f"Unsupported PGN for send_can_message: {pgn}", addr)
@@ -1198,7 +1206,7 @@ class CANControllerNode(BaseNode):
             )
             
             self.can_bus.send(message)
-            logger.debug(f"CAN message sent: arbitration_id=0x{can_data['arbitration_id']:X}, data={list(data_bytes)}")
+            logger.info(f"✅ CAN message sent to bus: arbitration_id=0x{can_data['arbitration_id']:X}, data={[hex(b) for b in data_bytes]}, length={len(data_bytes)}")
             return True
             
         except Exception as e:
