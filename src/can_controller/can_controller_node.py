@@ -21,10 +21,13 @@ import tempfile
 import signal
 import uuid
 
-# Import BaseNode from template-node submodule
-sys.path.append(str(Path(__file__).parent.parent.parent.parent.parent / "nodes" / "template-node" / "src"))
-
-from template_node.base_node import BaseNode, MessageType, Priority, NodeMessage
+# Import BaseNode from local module (with fallback for direct execution)
+try:
+    from .base_node import BaseNode, MessageType, Priority, NodeMessage
+except ImportError:
+    # Fallback for direct execution (not as package)
+    sys.path.insert(0, str(Path(__file__).parent))
+    from base_node import BaseNode, MessageType, Priority, NodeMessage
 from nmea2000.decoder import NMEA2000Decoder
 
 # Import constants for data categorization
