@@ -1,6 +1,6 @@
 {
     "node_name": "can_controller",
-    "node_port": 14553,
+    "node_port": 14554,
     "master_core_host": "localhost",
     "master_core_port": 14551,
     "direct_communication": true,
@@ -15,7 +15,7 @@
     "known_nodes": {
         "engine": {
             "host": "localhost",
-            "port": 14553
+            "port": 14554
         },
         "steering": {
             "host": "localhost",
