@@ -33,7 +33,7 @@ Edit `config.json` to configure:
     "can_interface": "socketcan",
     "can_channel": "vcan0",
     "can_bitrate": 250000,
-    "node_port": 14553,
+    "node_port": 14554,
     "master_core_host": "localhost",
     "master_core_port": 14551,
     "direct_communication": true,
