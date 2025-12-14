@@ -1132,35 +1132,47 @@ class CANControllerNode(BaseNode):
             position_rad = float(data.get("position", 0.0))
             direction_order = int(data.get("directionOrder", 0)) & 0xFFFF
             angle_order_rad = float(data.get("angleOrder", 0.0))
-            reserved_48 = int(data.get("reserved_48", 0)) & 0xFF
+            reserved_48 = int(data.get("reserved_48", 0xFFFF)) & 0xFFFF  # Default to 0xFFFF (16 bits) to match real-world hardware
             
-            # NMEA2000 PGN 127245 (Rudder) byte structure:
-            # Byte 0: Instance (8 bits)
-            # Byte 1-2: Direction Order (16 bits, little-endian)
-            # Byte 3-4: Reserved (11 bits) + Angle Order upper bits (5 bits) - simplified to 16-bit angle_order
-            # Byte 5-6: Position (radians, 16-bit scaled, little-endian)
-            # Byte 7: Reserved (48 bits) - only 8 bits used here
+            # NMEA2000 PGN 127245 (Rudder) BIT-LEVEL structure (per library definition):
+            # Bit 0-7: Instance (8 bits)
+            # Bit 8-10: Direction Order (3 bits)
+            # Bit 11-15: Reserved (5 bits)
+            # Bit 16-31: Angle Order (16 bits, signed, resolution 0.0001 rad/LSB)
+            # Bit 32-47: Position (16 bits, signed, resolution 0.0001 rad/LSB)
+            # Bit 48-63: Reserved (16 bits)
             
             # NMEA2000 uses 0.0001 rad per LSB for 16-bit signed values
-            # Scale: multiply by 10000, then convert to signed 16-bit
             RAD_SCALE = 10000  # 0.0001 rad per LSB
             
             # Convert radians to scaled integers (signed 16-bit)
             angle_order_scaled = int(round(angle_order_rad * RAD_SCALE))
             angle_order_scaled = max(-32768, min(32767, angle_order_scaled))  # Clamp to int16
+            # Convert to unsigned for bit manipulation (two's complement)
+            if angle_order_scaled < 0:
+                angle_order_unsigned = (angle_order_scaled + 65536) & 0xFFFF
+            else:
+                angle_order_unsigned = angle_order_scaled & 0xFFFF
             
             position_scaled = int(round(position_rad * RAD_SCALE))
             position_scaled = max(-32768, min(32767, position_scaled))  # Clamp to int16
+            # Convert to unsigned for bit manipulation (two's complement)
+            if position_scaled < 0:
+                position_unsigned = (position_scaled + 65536) & 0xFFFF
+            else:
+                position_unsigned = position_scaled & 0xFFFF
             
-            # Pack data bytes (little-endian)
-            # Format: B (uint8) + H (uint16) + h (int16) + h (int16) + B (uint8)
-            data_bytes = struct.pack('<B H h h B',
-                instance,                    # Byte 0: Instance
-                direction_order,             # Bytes 1-2: Direction Order (uint16)
-                angle_order_scaled,          # Bytes 3-4: Angle Order (int16, radians scaled)
-                position_scaled,            # Bytes 5-6: Position (int16, radians scaled)
-                reserved_48                 # Byte 7: Reserved
-            )
+            # Pack using bit-level encoding (matching NMEA2000 library structure)
+            data_raw = 0
+            data_raw |= (instance & 0xFF) << 0                    # Bits 0-7: Instance
+            data_raw |= (direction_order & 0x7) << 8              # Bits 8-10: Direction Order (3 bits)
+            data_raw |= (0 & 0x1F) << 11                          # Bits 11-15: Reserved (5 bits, set to 0)
+            data_raw |= (angle_order_unsigned & 0xFFFF) << 16     # Bits 16-31: Angle Order
+            data_raw |= (position_unsigned & 0xFFFF) << 32        # Bits 32-47: Position
+            data_raw |= (reserved_48 & 0xFFFF) << 48              # Bits 48-63: Reserved
+            
+            # Convert to bytes (little-endian)
+            data_bytes = data_raw.to_bytes(8, byteorder='little')
             
             # Get source address from config or use default
             source_address = self.get_config_value("can_source_address", 0x91)  # Default: 0x91 (common for control systems)
