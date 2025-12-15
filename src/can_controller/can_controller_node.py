@@ -166,8 +166,24 @@ class CANControllerNode(BaseNode):
     
     def _start_can_bus(self) -> bool:
         """Start CAN bus communication"""
+        import platform
+        import sys
+        
         try:
             logger.info(f"🔧 [can_controller] Attempting to start CAN bus on {self.can_interface}:{self.can_channel} at {self.can_bitrate} bps")
+            
+            # Check if socketcan is being used on Windows (not supported)
+            if platform.system() == 'Windows' and self.can_interface == 'socketcan':
+                logger.error(f"❌ [can_controller] SocketCAN is Linux-only and not available on Windows")
+                logger.error(f"❌ [can_controller] Please configure a Windows-compatible CAN interface:")
+                logger.error(f"   - 'pcan' (PEAK CAN)")
+                logger.error(f"   - 'vector' (Vector CAN)")
+                logger.error(f"   - 'kvaser' (Kvaser CAN)")
+                logger.error(f"   - 'slcan' (Serial CAN)")
+                logger.error(f"   - 'usb2can' (USB2CAN)")
+                logger.warning(f"⚠️ [can_controller] CAN bus initialization failed. Node will continue but CAN functionality will be unavailable.")
+                return False
+            
             self.can_bus = can.interface.Bus(
                 interface=self.can_interface,
                 channel=self.can_channel,
@@ -185,6 +201,21 @@ class CANControllerNode(BaseNode):
             logger.info(f"✅ [can_controller] CAN bus started successfully on {self.can_interface}:{self.can_channel}")
             return True
             
+        except OSError as e:
+            error_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
+            if error_code == 10047:  # WinError 10047: Address incompatible with protocol
+                logger.error(f"❌ [can_controller] CAN interface '{self.can_interface}' is not compatible with Windows")
+                if platform.system() == 'Windows':
+                    logger.error(f"❌ [can_controller] SocketCAN (Linux) cannot be used on Windows")
+                    logger.error(f"❌ [can_controller] Please configure a Windows-compatible interface in config.json:")
+                    logger.error(f"   - 'pcan' for PEAK CAN adapters")
+                    logger.error(f"   - 'vector' for Vector CAN interfaces")
+                    logger.error(f"   - 'kvaser' for Kvaser CAN interfaces")
+            else:
+                logger.error(f"❌ [can_controller] Failed to start CAN bus: {e}")
+            logger.error(f"❌ [can_controller] Error type: {type(e).__name__}, Code: {error_code}")
+            logger.warning(f"⚠️ [can_controller] CAN bus initialization failed. Node will continue but CAN functionality will be unavailable.")
+            return False
         except Exception as e:
             logger.error(f"❌ [can_controller] Failed to start CAN bus: {e}")
             logger.error(f"❌ [can_controller] Error type: {type(e).__name__}")

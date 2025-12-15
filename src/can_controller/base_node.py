@@ -163,12 +163,19 @@ class BaseNode:
                 self._process_message(message, addr)
             except socket.timeout:
                 continue
+            except (ConnectionResetError, OSError) as e:
+                # Windows-specific: UDP can raise ConnectionResetError when remote socket closes
+                # This is often benign for UDP (connectionless protocol) - log as debug/warning
+                error_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
+                if error_code == 10054:  # WinError 10054: Connection reset by peer
+                    logger.debug(f"UDP connection reset by remote host (Windows behavior, usually benign): {addr}")
+                else:
+                    logger.warning(f"UDP socket error: {e} (from {addr})")
             except Exception as e:
                 logger.error(f"❌ [{self.node_name}] Error receiving message: {e}")
                 logger.error(f"Error type: {type(e).__name__}")
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
-                logger.error(f"Raw data received: {data.decode('utf-8') if data else 'None'}")
     
     def send_to_master_core(self, message_type: MessageType, payload: Dict[str, Any], 
                           priority: Priority = Priority.NORMAL, requires_ack: bool = False):
