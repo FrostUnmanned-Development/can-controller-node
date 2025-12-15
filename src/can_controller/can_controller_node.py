@@ -1469,7 +1469,19 @@ class CANControllerNode(BaseNode):
         self._send_message(response, addr)
     
     def _send_emergency_stop_can(self):
-        """Send emergency stop message on CAN bus"""
+        """Send emergency stop message on CAN bus
+        
+        WARNING: This requires CAN bus to be initialized. If CAN bus is unavailable,
+        emergency stop will fail. Check can_bus_available status before calling.
+        
+        Returns:
+            bool: True if emergency stop sent successfully, False otherwise
+        """
+        if not self.can_bus:
+            logger.critical("❌ CRITICAL: Emergency stop failed - CAN bus not initialized!")
+            logger.critical("❌ Emergency stop requires CAN bus to be available")
+            return False
+        
         # This would be a specific CAN message for emergency stop
         emergency_message = can.Message(
             arbitration_id=0x1FF,  # Emergency stop PGN
@@ -1479,9 +1491,11 @@ class CANControllerNode(BaseNode):
         
         try:
             self.can_bus.send(emergency_message)
-            logger.critical("Emergency stop sent on CAN bus")
+            logger.critical("✅ Emergency stop sent on CAN bus")
+            return True
         except Exception as e:
-            logger.error(f"Failed to send emergency stop on CAN: {e}")
+            logger.critical(f"❌ CRITICAL: Failed to send emergency stop on CAN: {e}")
+            return False
     
     def get_status(self) -> Dict[str, Any]:
         """Get current node status (overrides base class to include CAN bus info)"""
