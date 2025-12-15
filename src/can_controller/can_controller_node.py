@@ -1483,10 +1483,12 @@ class CANControllerNode(BaseNode):
         except Exception as e:
             logger.error(f"Failed to send emergency stop on CAN: {e}")
     
-    def get_can_status(self) -> Dict[str, Any]:
-        """Get CAN-specific status"""
-        base_status = self.get_status()
+    def get_status(self) -> Dict[str, Any]:
+        """Get current node status (overrides base class to include CAN bus info)"""
+        base_status = super().get_status()
         base_status.update({
+            "can_bus_available": self.can_bus is not None,
+            "can_bus_initialized": self.can_bus is not None,
             "can_interface": self.can_interface,
             "can_channel": self.can_channel,
             "can_running": self.can_running,
@@ -1495,6 +1497,10 @@ class CANControllerNode(BaseNode):
             "playback_running": self.playback_running
         })
         return base_status
+    
+    def get_can_status(self) -> Dict[str, Any]:
+        """Get CAN-specific status (deprecated - use get_status() instead)"""
+        return self.get_status()
 
 # Global variables for signal handler
 _node_instance = None
