@@ -156,17 +156,17 @@ class CANControllerNode(BaseNode):
         logger.info(f"✅ [can_controller] CAN Controller Node using TTL: {self.data_ttl_days} days (from {config_source})")
         logger.info(f"🔧 [can_controller] TTL in seconds: {self.data_ttl_days * 86400}")
         
-        # Start CAN bus
-        if self._start_can_bus():
-            # Start background heartbeat task
-            self._start_heartbeat_task()
-            self.status = "RUNNING"
-            logger.info("✅ [can_controller] CAN Controller Node started successfully")
-            return True
-        else:
-            self.status = "ERROR"
-            logger.error("❌ [can_controller] Failed to start CAN bus")
-            return False
+        # Start CAN bus (node continues even if CAN bus fails)
+        can_bus_started = self._start_can_bus()
+        if not can_bus_started:
+            logger.warning("⚠️ [can_controller] CAN bus initialization failed, but node will continue running")
+            logger.warning("⚠️ [can_controller] CAN functionality will be unavailable, but node can still receive commands")
+        
+        # Start background heartbeat task (always start, even if CAN bus failed)
+        self._start_heartbeat_task()
+        self.status = "RUNNING"
+        logger.info("✅ [can_controller] CAN Controller Node started successfully")
+        return True
     
     def stop(self):
         """Stop the CAN controller node"""
