@@ -168,9 +168,10 @@ class BaseNode:
                 # This is often benign for UDP (connectionless protocol) - log as debug/warning
                 error_code = getattr(e, 'winerror', None) or getattr(e, 'errno', None)
                 if error_code == 10054:  # WinError 10054: Connection reset by peer
-                    logger.debug(f"UDP connection reset by remote host (Windows behavior, usually benign): {addr}")
+                    # addr may not be defined if error occurs before recvfrom completes
+                    logger.debug(f"UDP connection reset by remote host (Windows behavior, usually benign)")
                 else:
-                    logger.warning(f"UDP socket error: {e} (from {addr})")
+                    logger.warning(f"UDP socket error: {e}")
             except Exception as e:
                 logger.error(f"❌ [{self.node_name}] Error receiving message: {e}")
                 logger.error(f"Error type: {type(e).__name__}")

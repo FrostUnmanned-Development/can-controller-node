@@ -94,12 +94,42 @@ class CANControllerNode(BaseNode):
         """Handle configuration updates from Master Core
         
         Called automatically when Master Core sends config updates.
-        Updates TTL settings dynamically.
+        Updates TTL settings dynamically and CAN interface settings.
         """
         if "data_ttl_days" in config_updates:
             old_ttl = self.data_ttl_days
             self.data_ttl_days = self.get_config_value("data_ttl_days", 7)
             logger.info(f"TTL configuration updated: {old_ttl} -> {self.data_ttl_days} days")
+        
+        # Handle CAN interface/channel/bitrate updates
+        can_config_changed = False
+        if "can_interface" in config_updates:
+            old_interface = self.can_interface
+            self.can_interface = config_updates["can_interface"]
+            logger.info(f"CAN interface configuration updated: {old_interface} -> {self.can_interface}")
+            can_config_changed = True
+        
+        if "can_channel" in config_updates:
+            old_channel = self.can_channel
+            self.can_channel = config_updates["can_channel"]
+            logger.info(f"CAN channel configuration updated: {old_channel} -> {self.can_channel}")
+            can_config_changed = True
+        
+        if "can_bitrate" in config_updates:
+            old_bitrate = self.can_bitrate
+            self.can_bitrate = config_updates["can_bitrate"]
+            logger.info(f"CAN bitrate configuration updated: {old_bitrate} -> {self.can_bitrate}")
+            can_config_changed = True
+        
+        # Restart CAN bus if interface/channel/bitrate changed
+        if can_config_changed:
+            logger.info("🔄 [can_controller] Restarting CAN bus with new configuration...")
+            self._stop_can_bus()
+            time.sleep(0.5)  # Brief delay to ensure clean shutdown
+            if self._start_can_bus():
+                logger.info("✅ [can_controller] CAN bus restarted successfully with new configuration")
+            else:
+                logger.error("❌ [can_controller] Failed to restart CAN bus with new configuration")
     
     def start(self):
         """Start the CAN controller node"""
@@ -164,6 +194,43 @@ class CANControllerNode(BaseNode):
             self.stop()
             logger.info("CAN Controller Daemon stopped")
     
+    def _detect_available_can_interfaces(self) -> List[Dict[str, str]]:
+        """Auto-detect available CAN interfaces (last resort fallback)
+        
+        Returns list of detected interfaces with format:
+        [{"interface": "kvaser", "channel": "0"}, ...]
+        """
+        import platform
+        detected = []
+        
+        # Windows-compatible interfaces to try
+        windows_interfaces = ["kvaser", "pcan", "vector", "slcan", "usb2can"]
+        # Linux-compatible interfaces
+        linux_interfaces = ["socketcan", "slcan"]
+        
+        interfaces_to_try = windows_interfaces if platform.system() == 'Windows' else linux_interfaces
+        
+        logger.info(f"🔍 [can_controller] Auto-detecting available CAN interfaces...")
+        
+        for interface in interfaces_to_try:
+            try:
+                # Try to create a bus instance to test if interface is available
+                # Use channel 0 as default test channel
+                test_bus = can.interface.Bus(interface=interface, channel="0", bitrate=250000, receive_own_messages=False)
+                test_bus.shutdown()
+                detected.append({"interface": interface, "channel": "0"})
+                logger.info(f"   ✅ Detected: {interface} (channel: 0)")
+            except Exception as e:
+                # Interface not available or error - skip silently
+                pass
+        
+        if detected:
+            logger.info(f"✅ [can_controller] Auto-detected {len(detected)} CAN interface(s): {[d['interface'] for d in detected]}")
+        else:
+            logger.warning(f"⚠️ [can_controller] No CAN interfaces auto-detected")
+        
+        return detected
+    
     def _start_can_bus(self) -> bool:
         """Start CAN bus communication"""
         import platform
@@ -175,14 +242,24 @@ class CANControllerNode(BaseNode):
             # Check if socketcan is being used on Windows (not supported)
             if platform.system() == 'Windows' and self.can_interface == 'socketcan':
                 logger.error(f"❌ [can_controller] SocketCAN is Linux-only and not available on Windows")
-                logger.error(f"❌ [can_controller] Please configure a Windows-compatible CAN interface:")
-                logger.error(f"   - 'pcan' (PEAK CAN)")
-                logger.error(f"   - 'vector' (Vector CAN)")
-                logger.error(f"   - 'kvaser' (Kvaser CAN)")
-                logger.error(f"   - 'slcan' (Serial CAN)")
-                logger.error(f"   - 'usb2can' (USB2CAN)")
-                logger.warning(f"⚠️ [can_controller] CAN bus initialization failed. Node will continue but CAN functionality will be unavailable.")
-                return False
+                logger.info(f"🔍 [can_controller] Attempting auto-detection of Windows CAN interfaces...")
+                
+                # Try auto-detection as last resort
+                detected = self._detect_available_can_interfaces()
+                if detected:
+                    # Use first detected interface
+                    self.can_interface = detected[0]["interface"]
+                    self.can_channel = detected[0]["channel"]
+                    logger.info(f"✅ [can_controller] Auto-configured to use: {self.can_interface}:{self.can_channel}")
+                else:
+                    logger.error(f"❌ [can_controller] Please configure a Windows-compatible CAN interface:")
+                    logger.error(f"   - 'pcan' (PEAK CAN)")
+                    logger.error(f"   - 'vector' (Vector CAN)")
+                    logger.error(f"   - 'kvaser' (Kvaser CAN)")
+                    logger.error(f"   - 'slcan' (Serial CAN)")
+                    logger.error(f"   - 'usb2can' (USB2CAN)")
+                    logger.warning(f"⚠️ [can_controller] CAN bus initialization failed. Node will continue but CAN functionality will be unavailable.")
+                    return False
             
             self.can_bus = can.interface.Bus(
                 interface=self.can_interface,
