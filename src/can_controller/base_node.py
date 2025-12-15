@@ -266,17 +266,30 @@ class BaseNode:
     
     def _serialize_message(self, message: NodeMessage) -> Dict[str, Any]:
         """Serialize message for transmission"""
+        # Recursively convert bytes objects to lists for JSON serialization
+        payload = self._convert_bytes_to_list(message.payload)
         return {
             "message_id": message.message_id,
             "type": message.type.value,
             "priority": message.priority.value,
             "source": message.source,
             "destination": message.destination,
-            "payload": message.payload,
+            "payload": payload,
             "timestamp": message.timestamp,
             "ttl": message.ttl,
             "requires_ack": message.requires_ack
         }
+    
+    def _convert_bytes_to_list(self, obj):
+        """Recursively convert bytes objects to lists for JSON serialization"""
+        if isinstance(obj, bytes):
+            return list(obj)
+        elif isinstance(obj, dict):
+            return {key: self._convert_bytes_to_list(value) for key, value in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._convert_bytes_to_list(item) for item in obj]
+        else:
+            return obj
     
     def _deserialize_message(self, data: Dict[str, Any]) -> NodeMessage:
         """Deserialize received message"""

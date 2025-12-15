@@ -197,37 +197,68 @@ class CANControllerNode(BaseNode):
     def _detect_available_can_interfaces(self) -> List[Dict[str, str]]:
         """Auto-detect available CAN interfaces (last resort fallback)
         
+        Reads interface options from config file (can_interface_1-4) and tests each one.
+        Falls back to platform-specific defaults if config interfaces fail.
+        
         Returns list of detected interfaces with format:
         [{"interface": "kvaser", "channel": "0"}, ...]
         """
         import platform
         detected = []
         
-        # Windows-compatible interfaces to try
-        windows_interfaces = ["kvaser", "pcan", "vector", "slcan", "usb2can"]
-        # Linux-compatible interfaces
-        linux_interfaces = ["socketcan", "slcan"]
+        # First, try interfaces from config file (can_interface_1-4)
+        config_interfaces = []
+        for i in range(1, 5):  # Check can_interface_1 through can_interface_4
+            interface_key = f"can_interface_{i}"
+            channel_key = f"can_channel_{i}"
+            interface = self.get_config_value(interface_key)
+            channel = self.get_config_value(channel_key, "0")
+            
+            if interface:
+                config_interfaces.append({"interface": interface, "channel": channel})
         
-        interfaces_to_try = windows_interfaces if platform.system() == 'Windows' else linux_interfaces
+        # Also check primary can_interface/can_channel if present
+        primary_interface = self.get_config_value("can_interface")
+        primary_channel = self.get_config_value("can_channel", "0")
+        if primary_interface:
+            config_interfaces.insert(0, {"interface": primary_interface, "channel": primary_channel})
         
-        logger.info(f"🔍 [can_controller] Auto-detecting available CAN interfaces...")
+        # Fallback to platform-specific defaults if no config interfaces found
+        if not config_interfaces:
+            if platform.system() == 'Windows':
+                config_interfaces = [
+                    {"interface": "kvaser", "channel": "0"},
+                    {"interface": "pcan", "channel": "0"},
+                    {"interface": "vector", "channel": "0"},
+                    {"interface": "slcan", "channel": "0"},
+                    {"interface": "usb2can", "channel": "0"}
+                ]
+            else:  # Linux
+                config_interfaces = [
+                    {"interface": "socketcan", "channel": "vcan0"},
+                    {"interface": "slcan", "channel": "0"}
+                ]
         
-        for interface in interfaces_to_try:
+        logger.info(f"🔍 [can_controller] Auto-detecting available CAN interfaces from config...")
+        logger.info(f"   Config interfaces to test: {[f\"{d['interface']}:{d['channel']}\" for d in config_interfaces]}")
+        
+        for interface_config in config_interfaces:
+            interface = interface_config["interface"]
+            channel = interface_config["channel"]
             try:
                 # Try to create a bus instance to test if interface is available
-                # Use channel 0 as default test channel
-                test_bus = can.interface.Bus(interface=interface, channel="0", bitrate=250000, receive_own_messages=False)
+                test_bus = can.interface.Bus(interface=interface, channel=channel, bitrate=250000, receive_own_messages=False)
                 test_bus.shutdown()
-                detected.append({"interface": interface, "channel": "0"})
-                logger.info(f"   ✅ Detected: {interface} (channel: 0)")
+                detected.append({"interface": interface, "channel": channel})
+                logger.info(f"   ✅ Detected: {interface} (channel: {channel})")
             except Exception as e:
                 # Interface not available or error - skip silently
-                pass
+                logger.debug(f"   ⏭️  Skipped {interface}:{channel} (not available)")
         
         if detected:
             logger.info(f"✅ [can_controller] Auto-detected {len(detected)} CAN interface(s): {[d['interface'] for d in detected]}")
         else:
-            logger.warning(f"⚠️ [can_controller] No CAN interfaces auto-detected")
+            logger.warning(f"⚠️ [can_controller] No CAN interfaces auto-detected from config or defaults")
         
         return detected
     
