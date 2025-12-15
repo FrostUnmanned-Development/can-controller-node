@@ -240,7 +240,8 @@ class CANControllerNode(BaseNode):
                 ]
         
         logger.info(f"🔍 [can_controller] Auto-detecting available CAN interfaces from config...")
-        logger.info(f"   Config interfaces to test: {[f\"{d['interface']}:{d['channel']}\" for d in config_interfaces]}")
+        interface_list = [f"{d['interface']}:{d['channel']}" for d in config_interfaces]
+        logger.info(f"   Config interfaces to test: {interface_list}")
         
         for interface_config in config_interfaces:
             interface = interface_config["interface"]
