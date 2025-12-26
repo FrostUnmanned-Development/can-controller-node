@@ -290,6 +290,12 @@ class CANControllerNode(BaseNode):
                     logger.error(f"   - 'kvaser' (Kvaser CAN)")
                     logger.error(f"   - 'slcan' (Serial CAN)")
                     logger.error(f"   - 'usb2can' (USB2CAN)")
+                    # Keep current values (don't reset to None) but mark as unavailable
+                    # This ensures status queries return valid strings
+                    if not self.can_interface or self.can_interface == "socketcan":
+                        self.can_interface = "unknown"
+                    if not self.can_channel:
+                        self.can_channel = "unknown"
                     logger.warning(f"⚠️ [can_controller] CAN bus initialization failed. Node will continue but CAN functionality will be unavailable.")
                     return False
             
@@ -1627,11 +1633,16 @@ class CANControllerNode(BaseNode):
         # Verify bus is actually functional, not just created
         can_bus_functional = self._verify_can_bus_functional()
         
+        # Ensure can_interface and can_channel are strings (not None)
+        can_interface = str(self.can_interface) if self.can_interface is not None else "unknown"
+        can_channel = str(self.can_channel) if self.can_channel is not None else "unknown"
+        
         base_status.update({
             "can_bus_available": can_bus_functional,  # Only True if actually functional
             "can_bus_initialized": self.can_bus is not None,  # True if bus object exists
-            "can_interface": self.can_interface,
-            "can_channel": self.can_channel,
+            "can_interface": can_interface,
+            "can_channel": can_channel,
+            "can_bitrate": self.can_bitrate,
             "can_running": self.can_running,
             "subscribers": len(self.data_subscribers),
             "emergency_stop_enabled": self.emergency_stop_enabled,

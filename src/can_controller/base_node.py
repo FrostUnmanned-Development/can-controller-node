@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any
 from dataclasses import dataclass
 from enum import Enum
+from collections import deque
 
 # Configure logging
 logging.basicConfig(
@@ -22,6 +23,107 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+class NodeLogHandler(logging.Handler):
+    """
+    Custom logging handler that sends log messages to Master Core for streaming.
+    
+    Features:
+    - Buffers last 100 log messages per node
+    - Rate limiting (max 10 messages per second)
+    - Sends logs to Master Core via IPC
+    """
+    
+    def __init__(self, node_name: str, send_callback: Callable, buffer_size: int = 100, rate_limit: float = 10.0):
+        """
+        Initialize the log handler
+        
+        Args:
+            node_name: Name of the node (for identification)
+            send_callback: Function to call to send log to Master Core
+            buffer_size: Maximum number of log messages to buffer (default: 100)
+            rate_limit: Maximum messages per second (default: 10.0)
+        """
+        super().__init__()
+        self.node_name = node_name
+        self.send_callback = send_callback
+        self.buffer_size = buffer_size
+        self.rate_limit = rate_limit  # messages per second
+        
+        # Log buffer (ring buffer using deque)
+        self.log_buffer = deque(maxlen=buffer_size)
+        
+        # Rate limiting
+        self.message_times = deque(maxlen=int(rate_limit * 2))  # Keep last 2 seconds of timestamps
+        self.rate_limit_lock = threading.Lock()
+        
+        # Set log level to capture all levels
+        self.setLevel(logging.DEBUG)
+        
+        # Format for log messages
+        self.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    
+    def emit(self, record: logging.LogRecord):
+        """Emit a log record (called by logging system)"""
+        try:
+            # Format the log message
+            log_message = self.format(record)
+            
+            # Create log entry
+            log_entry = {
+                "node": self.node_name,
+                "level": record.levelname,
+                "levelno": record.levelno,
+                "message": log_message,
+                "module": record.module,
+                "funcName": record.funcName,
+                "lineno": record.lineno,
+                "timestamp": record.created
+            }
+            
+            # Add to buffer
+            self.log_buffer.append(log_entry)
+            
+            # Rate limiting check
+            if self._check_rate_limit():
+                # Send to Master Core
+                try:
+                    self.send_callback(log_entry)
+                except Exception as e:
+                    # Don't log errors from log handler to avoid recursion
+                    pass
+        except Exception:
+            # Ignore errors in log handler to avoid recursion
+            self.handleError(record)
+    
+    def _check_rate_limit(self) -> bool:
+        """Check if we're within rate limit
+        
+        Returns:
+            bool: True if we can send the message, False if rate limited
+        """
+        with self.rate_limit_lock:
+            current_time = time.time()
+            
+            # Remove timestamps older than 1 second
+            while self.message_times and (current_time - self.message_times[0]) > 1.0:
+                self.message_times.popleft()
+            
+            # Check if we're at rate limit
+            if len(self.message_times) >= self.rate_limit:
+                return False
+            
+            # Add current timestamp
+            self.message_times.append(current_time)
+            return True
+    
+    def get_buffered_logs(self) -> List[Dict[str, Any]]:
+        """Get all buffered log messages
+        
+        Returns:
+            List of log entries (most recent first)
+        """
+        return list(self.log_buffer)
 
 class MessageType(Enum):
     """Message types for node communication"""
@@ -32,6 +134,7 @@ class MessageType(Enum):
     HEARTBEAT = "heartbeat"
     DATA = "data"
     CONFIG_UPDATE = "config_update"
+    LOG = "log"  # Log messages for streaming
 
 class Priority(Enum):
     """Message priority levels"""
@@ -99,6 +202,10 @@ class BaseNode:
         # Register default handlers
         self._register_default_handlers()
         
+        # Set up log streaming handler
+        self.log_handler = None
+        self._setup_log_streaming()
+        
         logger.info(f"Node {self.node_name} initialized with ID {self.node_id}")
     
     def _register_default_handlers(self):
@@ -110,6 +217,50 @@ class BaseNode:
             "ack": self._handle_ack,
             "config_update": self._handle_config_update
         }
+    
+    def _setup_log_streaming(self):
+        """Set up log streaming to Master Core"""
+        try:
+            # Create callback function to send logs to Master Core
+            def send_log_to_master_core(log_entry: Dict[str, Any]):
+                """Callback to send log entry to Master Core"""
+                if self.master_core_host and self.master_core_port:
+                    try:
+                        self.send_to_master_core(
+                            MessageType.LOG,
+                            log_entry,
+                            priority=Priority.NORMAL,
+                            requires_ack=False
+                        )
+                    except Exception:
+                        # Silently fail - don't log errors from log handler
+                        pass
+            
+            # Create and add log handler
+            self.log_handler = NodeLogHandler(
+                node_name=self.node_name,
+                send_callback=send_log_to_master_core,
+                buffer_size=100,
+                rate_limit=10.0  # Max 10 messages per second
+            )
+            
+            # Add handler to root logger (captures all logs from this node)
+            root_logger = logging.getLogger()
+            root_logger.addHandler(self.log_handler)
+            
+            logger.debug(f"Log streaming enabled for {self.node_name}")
+        except Exception as e:
+            logger.warning(f"Failed to set up log streaming: {e}")
+    
+    def get_buffered_logs(self) -> List[Dict[str, Any]]:
+        """Get buffered log messages (for testing/debugging)
+        
+        Returns:
+            List of log entries (most recent first)
+        """
+        if self.log_handler:
+            return self.log_handler.get_buffered_logs()
+        return []
     
     def start(self):
         """Start the node"""
@@ -133,6 +284,13 @@ class BaseNode:
                 self.udp_socket.close()
             if self.listen_thread:
                 self.listen_thread.join(timeout=5)
+            
+            # Remove log handler
+            if self.log_handler:
+                root_logger = logging.getLogger()
+                root_logger.removeHandler(self.log_handler)
+                self.log_handler = None
+            
             self.status = "STOPPED"
             logger.info(f"Node {self.node_name} stopped")
         except Exception as e:
