@@ -301,9 +301,15 @@ class CANControllerNode(BaseNode):
             logger.info(f"✅ [can_controller] CAN bus object created: {self.can_bus}")
             
             # Verify the bus is actually functional by checking if we can get bus state
-            # For SocketCAN, try to get the interface state to verify it exists
+            # For SocketCAN on Linux, verify the interface exists by checking system
+            # For Windows interfaces, python-can validates during Bus() creation
             try:
                 if self.can_interface == 'socketcan':
+                    if platform.system() == 'Windows':
+                        # SocketCAN is Linux-only - this should have been caught earlier
+                        logger.error(f"❌ [can_controller] SocketCAN is Linux-only - cannot verify on Windows")
+                        raise OSError("SocketCAN not available on Windows")
+                    
                     # On Linux, verify the interface exists by checking system
                     import subprocess
                     result = subprocess.run(
@@ -319,18 +325,29 @@ class CANControllerNode(BaseNode):
                         logger.warning(f"⚠️ [can_controller] CAN interface '{self.can_channel}' exists but is DOWN")
                         # Don't fail - interface might come up later
                 
-                # Try a test operation to verify bus is functional
-                # For SocketCAN, we can check the bus state
+                # For Windows interfaces, if Bus() creation succeeded, interface exists
+                # (python-can raises exception if interface doesn't exist)
+                if platform.system() == 'Windows':
+                    logger.debug(f"✅ [can_controller] Windows CAN interface '{self.can_interface}' verified (Bus() creation succeeded)")
+                
+                # Try a test operation to verify bus is functional (if supported)
                 if hasattr(self.can_bus, 'state'):
-                    bus_state = self.can_bus.state
-                    logger.debug(f"CAN bus state: {bus_state}")
+                    try:
+                        bus_state = self.can_bus.state
+                        logger.debug(f"CAN bus state: {bus_state}")
+                    except Exception:
+                        # Some interfaces don't support state - that's OK
+                        pass
                 
                 logger.info(f"✅ [can_controller] CAN bus verified and functional")
             except subprocess.TimeoutExpired:
                 logger.warning(f"⚠️ [can_controller] Timeout checking CAN interface '{self.can_channel}' - assuming it exists")
             except FileNotFoundError:
                 # 'ip' command not available (Windows or minimal Linux) - skip verification
-                logger.debug(f"⚠️ [can_controller] 'ip' command not available - skipping interface verification")
+                if platform.system() == 'Windows':
+                    logger.debug(f"✅ [can_controller] Windows CAN interface - Bus() creation succeeded, interface verified")
+                else:
+                    logger.debug(f"⚠️ [can_controller] 'ip' command not available - skipping interface verification")
             except Exception as e:
                 logger.error(f"❌ [can_controller] Failed to verify CAN bus: {e}")
                 logger.error(f"❌ [can_controller] CAN interface '{self.can_channel}' may not exist or be accessible")
@@ -1547,11 +1564,18 @@ class CANControllerNode(BaseNode):
         Returns:
             bool: True if bus exists and appears functional, False otherwise
         """
+        import platform
+        
         if not self.can_bus:
             return False
         
         # For SocketCAN on Linux, verify the interface actually exists
         if self.can_interface == 'socketcan':
+            if platform.system() == 'Windows':
+                # SocketCAN is Linux-only - should never happen on Windows
+                # (we check this during startup, but verify here too)
+                return False
+            
             try:
                 import subprocess
                 result = subprocess.run(
@@ -1569,7 +1593,31 @@ class CANControllerNode(BaseNode):
                 # Can't verify - assume functional if bus object exists
                 return self.can_bus is not None
         
-        # For other interfaces, assume functional if bus object exists
+        # For Windows interfaces (kvaser, pcan, vector, etc.):
+        # If python-can successfully created the bus object, the interface exists
+        # (python-can raises an exception if the interface doesn't exist)
+        # However, we can try to verify it's still functional by checking bus state
+        if platform.system() == 'Windows':
+            try:
+                # Try to access bus state or perform a test operation
+                if hasattr(self.can_bus, 'state'):
+                    # Some interfaces expose state - check it
+                    try:
+                        state = self.can_bus.state
+                        # If we can read state, bus is functional
+                        return True
+                    except Exception:
+                        # Can't read state - assume functional if bus exists
+                        return self.can_bus is not None
+                else:
+                    # No state attribute - assume functional if bus object exists
+                    # (python-can would have raised exception during creation if interface didn't exist)
+                    return self.can_bus is not None
+            except Exception:
+                # Error checking bus - assume not functional
+                return False
+        
+        # For other interfaces (Linux non-SocketCAN, etc.), assume functional if bus object exists
         return self.can_bus is not None
     
     def get_status(self) -> Dict[str, Any]:
