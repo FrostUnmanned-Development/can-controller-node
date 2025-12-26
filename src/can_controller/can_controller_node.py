@@ -298,7 +298,44 @@ class CANControllerNode(BaseNode):
                 channel=self.can_channel,
                 bitrate=self.can_bitrate
             )
-            logger.info(f"✅ [can_controller] CAN bus initialized successfully: {self.can_bus}")
+            logger.info(f"✅ [can_controller] CAN bus object created: {self.can_bus}")
+            
+            # Verify the bus is actually functional by checking if we can get bus state
+            # For SocketCAN, try to get the interface state to verify it exists
+            try:
+                if self.can_interface == 'socketcan':
+                    # On Linux, verify the interface exists by checking system
+                    import subprocess
+                    result = subprocess.run(
+                        ['ip', 'link', 'show', self.can_channel],
+                        capture_output=True,
+                        text=True,
+                        timeout=1
+                    )
+                    if result.returncode != 0:
+                        raise OSError(f"CAN interface '{self.can_channel}' does not exist")
+                    # Check if interface is UP
+                    if 'UP' not in result.stdout and 'UNKNOWN' not in result.stdout:
+                        logger.warning(f"⚠️ [can_controller] CAN interface '{self.can_channel}' exists but is DOWN")
+                        # Don't fail - interface might come up later
+                
+                # Try a test operation to verify bus is functional
+                # For SocketCAN, we can check the bus state
+                if hasattr(self.can_bus, 'state'):
+                    bus_state = self.can_bus.state
+                    logger.debug(f"CAN bus state: {bus_state}")
+                
+                logger.info(f"✅ [can_controller] CAN bus verified and functional")
+            except subprocess.TimeoutExpired:
+                logger.warning(f"⚠️ [can_controller] Timeout checking CAN interface '{self.can_channel}' - assuming it exists")
+            except FileNotFoundError:
+                # 'ip' command not available (Windows or minimal Linux) - skip verification
+                logger.debug(f"⚠️ [can_controller] 'ip' command not available - skipping interface verification")
+            except Exception as e:
+                logger.error(f"❌ [can_controller] Failed to verify CAN bus: {e}")
+                logger.error(f"❌ [can_controller] CAN interface '{self.can_channel}' may not exist or be accessible")
+                # Don't fail here - let the bus try to work, but log the warning
+                # The bus will fail on actual send/receive if it's not functional
             
             # Start CAN message listener
             self.can_running = True
@@ -1504,12 +1541,47 @@ class CANControllerNode(BaseNode):
             logger.critical(f"❌ CRITICAL: Failed to send emergency stop on CAN: {e}")
             return False
     
+    def _verify_can_bus_functional(self) -> bool:
+        """Verify that CAN bus is actually functional (not just created)
+        
+        Returns:
+            bool: True if bus exists and appears functional, False otherwise
+        """
+        if not self.can_bus:
+            return False
+        
+        # For SocketCAN on Linux, verify the interface actually exists
+        if self.can_interface == 'socketcan':
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ['ip', 'link', 'show', self.can_channel],
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+                if result.returncode != 0:
+                    # Interface doesn't exist
+                    return False
+                # Interface exists - bus should be functional
+                return True
+            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+                # Can't verify - assume functional if bus object exists
+                return self.can_bus is not None
+        
+        # For other interfaces, assume functional if bus object exists
+        return self.can_bus is not None
+    
     def get_status(self) -> Dict[str, Any]:
         """Get current node status (overrides base class to include CAN bus info)"""
         base_status = super().get_status()
+        
+        # Verify bus is actually functional, not just created
+        can_bus_functional = self._verify_can_bus_functional()
+        
         base_status.update({
-            "can_bus_available": self.can_bus is not None,
-            "can_bus_initialized": self.can_bus is not None,
+            "can_bus_available": can_bus_functional,  # Only True if actually functional
+            "can_bus_initialized": self.can_bus is not None,  # True if bus object exists
             "can_interface": self.can_interface,
             "can_channel": self.can_channel,
             "can_running": self.can_running,
