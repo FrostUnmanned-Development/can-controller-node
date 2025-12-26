@@ -1106,6 +1106,13 @@ class CANControllerNode(BaseNode):
                 "pgn": pgn,
                 "source_address": source_address
             }, addr)
+        elif command == "get_can_status":
+            # Return CAN-specific status information
+            can_status = self.get_can_status()
+            self._send_response(message, {
+                "status": "success",
+                **can_status
+            }, addr)
         elif command == "send_can_message":
             # Handle send_can_message command from other nodes (e.g., Steering Control Node)
             # Expected payload: {"pgn": int, "data": dict}
