@@ -1096,6 +1096,63 @@ class CANControllerNode(BaseNode):
         except Exception as e:
             logger.error(f"Error sending parsed data to DB: {e}")
     
+    def _store_can_command(self, arbitration_id: int, data_bytes: bytes, pgn: Optional[int] = None, source_node: str = "unknown", original_data: Optional[Dict[str, Any]] = None):
+        """Store outgoing CAN command in database (commands collection)
+        
+        This allows tracking which CAN frames were sent out and from which node,
+        useful for debugging and fine-tuning actuator limits.
+        
+        Args:
+            arbitration_id: CAN arbitration ID
+            data_bytes: CAN message data bytes
+            pgn: Optional PGN (Parameter Group Number) for NMEA2000 messages
+            source_node: Source node name (e.g., 'steering_control', 'engine_control')
+            original_data: Optional original data dictionary before formatting (for reference)
+        """
+        try:
+            # Build command document
+            command_doc = {
+                "timestamp": datetime.now().isoformat(),
+                "arbitration_id": arbitration_id,
+                "arbitration_id_hex": f"0x{arbitration_id:X}",
+                "data": [hex(b) for b in data_bytes],  # Store as hex strings for readability
+                "data_bytes": list(data_bytes),  # Also store as bytes for parsing
+                "data_length": len(data_bytes),
+                "source_node": source_node,
+                "direction": "outgoing"  # Mark as outgoing command
+            }
+            
+            # Add PGN if available
+            if pgn is not None:
+                command_doc["pgn"] = pgn
+                command_doc["pgn_hex"] = f"0x{pgn:X}"
+            
+            # Add original data if available (for reference/debugging)
+            if original_data:
+                command_doc["original_data"] = original_data
+            
+            # Add TTL expiration
+            expiration_date = datetime.now() + timedelta(days=self.data_ttl_days)
+            command_doc["ttl_expiration"] = expiration_date.isoformat()
+            
+            # Send to Master Core for database storage in "commands" collection
+            self.send_to_master_core(
+                MessageType.COMMAND,
+                {
+                    "command": "store_can_data",
+                    "collection": "commands",
+                    "data": command_doc,
+                    "category": "COMMAND"
+                },
+                Priority.NORMAL
+            )
+            
+            logger.debug(f"Stored CAN command in database: PGN={pgn}, source={source_node}, CAN_ID=0x{arbitration_id:X}")
+            
+        except Exception as e:
+            logger.error(f"Error storing CAN command in database: {e}")
+            # Don't fail the send operation if storage fails
+    
     def _get_collection_name(self, category):
         """Get MongoDB collection name based on data category"""
         if category == DataCategories.HEARTBEAT:
@@ -1178,6 +1235,7 @@ class CANControllerNode(BaseNode):
             # Expected payload: {"pgn": int, "data": dict}
             pgn = message.payload.get("pgn")
             data = message.payload.get("data", {})
+            source_node = message.source  # Track which node sent this command
             
             if pgn is None:
                 self._send_error_response(message, "Missing pgn in payload", addr)
@@ -1185,13 +1243,14 @@ class CANControllerNode(BaseNode):
             
             if pgn == 127245:  # Rudder PGN
                 # Format NMEA2000 message
-                logger.info(f"📤 Received send_can_message command for PGN 127245 (Rudder), data: {data}")
+                logger.info(f"📤 Received send_can_message command for PGN 127245 (Rudder) from {source_node}, data: {data}")
                 can_message_data = self._format_rudder_message(data)
                 if can_message_data:
                     logger.info(f"📤 Formatted CAN message: arbitration_id=0x{can_message_data['arbitration_id']:X}, data={can_message_data['data']}")
                     if not self.can_bus:
                         logger.error("❌ CAN bus not initialized! Cannot send message.")
-                    success = self._send_can_message(can_message_data)
+                    # Store command before sending (includes source node tracking)
+                    success = self._send_can_message(can_message_data, pgn=pgn, source_node=source_node, original_data=data)
                     self._send_response(message, {
                         "status": "success" if success else "error",
                         "pgn": pgn,
@@ -1410,8 +1469,15 @@ class CANControllerNode(BaseNode):
             logger.debug(traceback.format_exc())
             return None
     
-    def _send_can_message(self, can_data: Dict[str, Any]):
-        """Send message on CAN bus"""
+    def _send_can_message(self, can_data: Dict[str, Any], pgn: Optional[int] = None, source_node: Optional[str] = None, original_data: Optional[Dict[str, Any]] = None):
+        """Send message on CAN bus and store command in database
+        
+        Args:
+            can_data: Dictionary with 'arbitration_id', 'data', 'is_extended_id'
+            pgn: Optional PGN (Parameter Group Number) for NMEA2000 messages
+            source_node: Optional source node name (e.g., 'steering_control')
+            original_data: Optional original data dictionary before formatting
+        """
         try:
             if not self.can_bus:
                 logger.error("CAN bus not initialized")
@@ -1429,6 +1495,16 @@ class CANControllerNode(BaseNode):
                 data=data_bytes,
                 is_extended_id=can_data.get("is_extended_id", False)
             )
+            
+            # Store command in database BEFORE sending (for tracking)
+            if pgn is not None or source_node is not None:
+                self._store_can_command(
+                    arbitration_id=can_data["arbitration_id"],
+                    data_bytes=data_bytes,
+                    pgn=pgn,
+                    source_node=source_node or "unknown",
+                    original_data=original_data
+                )
             
             self.can_bus.send(message)
             logger.info(f"✅ CAN message sent to bus: arbitration_id=0x{can_data['arbitration_id']:X}, data={[hex(b) for b in data_bytes]}, length={len(data_bytes)}")
@@ -1680,6 +1756,9 @@ def main():
     parser = argparse.ArgumentParser(description="CAN Controller Node")
     parser.add_argument("--config", default="config.json", help="Configuration file")
     parser.add_argument("--daemon", action="store_true", help="Run as daemon")
+    parser.add_argument("--log-level", type=str, default="INFO", 
+                       choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                       help="Set logging level")
     
     args = parser.parse_args()
     
@@ -1703,18 +1782,19 @@ def main():
         }
     
     # Configure logging
+    log_level = getattr(logging, args.log_level)
     # On Windows daemon mode, ensure errors go to stderr for Master Core to capture
     if args.daemon and platform.system() == 'Windows':
         # Windows daemon: log to stderr so Master Core can capture it
         logging.basicConfig(
-            level=logging.INFO,
+            level=log_level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[logging.StreamHandler(sys.stderr)]
         )
     else:
         # Normal mode: use default stdout
         logging.basicConfig(
-            level=logging.INFO,
+            level=log_level,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
     
